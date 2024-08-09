@@ -1,8 +1,12 @@
 import functools
 import time
 import logging
+import os
 from typing import TypeVar, overload
 
+from angr import sim_options as o
+from angr.errors import SimValueError, SimUnsatError, SimSolverModeError, SimSolverOptionError
+import claripy
 from claripy import backend_manager
 
 from .plugin import SimStatePlugin
@@ -71,8 +75,6 @@ def disable_timing():
     global _timing_enabled
     _timing_enabled = False
 
-
-import os
 
 if os.environ.get("SOLVER_TIMING", False):
     enable_timing()
@@ -191,8 +193,6 @@ def concrete_path_list(f):
 # The main event
 #
 
-import claripy
-
 
 class SimSolver(SimStatePlugin):
     """
@@ -299,23 +299,11 @@ class SimSolver(SimStatePlugin):
         approximate_first = o.APPROXIMATE_FIRST in self.state.options
 
         if o.STRINGS_ANALYSIS in self.state.options:
-            if "smtlib_cvc4" in backend_manager.backends._backends_by_name:
-                our_backend = backend_manager.backends.smtlib_cvc4
-            elif "smtlib_z3" in backend_manager.backends._backends_by_name:
-                our_backend = backend_manager.backends.smtlib_z3
-            elif "smtlib_abc" in backend_manager.backends._backends_by_name:
-                our_backend = backend_manager.backends.smtlib_abc
-            else:
-                l.error(
-                    "Cannot find a suitable string solver. Please ensure you have installed a string solver that "
-                    "angr supports, and have imported the corresponding solver backend in claripy. You can try "
-                    'adding "from claripy.backends.backend_smtlib_solvers import *" at the beginning of your '
-                    "script."
-                )
-                raise ValueError("Cannot find a suitable string solver")
             if o.COMPOSITE_SOLVER in self.state.options:
                 self._stored_solver = claripy.SolverComposite(
-                    template_solver_string=claripy.SolverCompositeChild(backend=our_backend, track=track)
+                    template_solver_string=claripy.SolverCompositeChild(
+                        backend=backend_manager.backends.z3, track=track
+                    )
                 )
         elif o.ABSTRACT_SOLVER in self.state.options:
             self._stored_solver = claripy.SolverVSA()
@@ -1124,6 +1112,4 @@ from angr.sim_state import SimState
 
 SimState.register_default("solver", SimSolver)
 
-from .. import sim_options as o
 from .inspect import BP_AFTER
-from ..errors import SimValueError, SimUnsatError, SimSolverModeError, SimSolverOptionError

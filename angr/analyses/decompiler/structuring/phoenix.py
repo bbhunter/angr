@@ -1,7 +1,7 @@
 # pylint:disable=line-too-long,import-outside-toplevel,import-error,multiple-statements,too-many-boolean-expressions
 from typing import Any, DefaultDict, Optional, TYPE_CHECKING
 from collections import OrderedDict as ODict
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 from enum import Enum
 import logging
 
@@ -83,7 +83,7 @@ class PhoenixStructurer(StructurerBase):
         func: Optional["Function"] = None,
         case_entry_to_switch_head: dict[int, int] | None = None,
         parent_region=None,
-        improve_structurer=True,
+        improve_algorithm=False,
         use_multistmtexprs: MultiStmtExprMode = MultiStmtExprMode.MAX_ONE_CALL,
         **kwargs,
     ):
@@ -94,7 +94,6 @@ class PhoenixStructurer(StructurerBase):
             func=func,
             case_entry_to_switch_head=case_entry_to_switch_head,
             parent_region=parent_region,
-            improve_structurer=improve_structurer,
             **kwargs,
         )
 
@@ -111,13 +110,17 @@ class PhoenixStructurer(StructurerBase):
         # absorbed into other SequenceNodes
         self.dowhile_known_tail_nodes: set = set()
 
-        self._phoenix_improved = self._improve_structurer
+        # in reimplementing the core phoenix algorithm from the phoenix decompiler paper, two types of changes were
+        # made to the algorithm:
+        # 1. Mandatory fixes to correct flaws we found in the algorithm
+        # 2. Optional fixes to improve the results of already correct choices
+        #
+        # the improve_algorithm flag controls whether the optional fixes are applied. these are disabled by default
+        # to be as close to the original algorithm as possible. for best results, enable this flag.
+        self._improve_algorithm = improve_algorithm
         self._edge_virtualization_hints = []
 
         self._use_multistmtexprs = use_multistmtexprs
-        if not self._phoenix_improved:
-            self._use_multistmtexprs = MultiStmtExprMode.NEVER
-
         self._analyze()
 
     @staticmethod
@@ -245,7 +248,7 @@ class PhoenixStructurer(StructurerBase):
             self._rewrite_jumps_to_continues(loop_node.sequence_node, loop_node=loop_node)
             return True
 
-        if self._phoenix_improved:
+        if self._improve_algorithm:
             matched, loop_node, successor_node = self._match_cyclic_while_with_single_successor(
                 node, head, graph, full_graph
             )
@@ -378,7 +381,7 @@ class PhoenixStructurer(StructurerBase):
 
                             return True, loop_node, right
 
-                if self._phoenix_improved:
+                if self._improve_algorithm:
                     if full_graph.out_degree[node] == 1:
                         # while (true) { ...; if (...) break; }
                         _, _, head_block = self._find_node_going_to_dst(node, left, condjump_only=True)
@@ -497,7 +500,7 @@ class PhoenixStructurer(StructurerBase):
                             self._remove_last_statement_if_jump(succ)
                             drop_succ = False
 
-                            if self._phoenix_improved:
+                            if self._improve_algorithm:
                                 # absorb the entire succ block if possible
                                 if self._is_sequential_statement_block(succ) and self._should_use_multistmtexprs(succ):
                                     stmts = self._build_multistatementexpr_statements(succ)
@@ -719,7 +722,7 @@ class PhoenixStructurer(StructurerBase):
                             break_stmt = Jump(
                                 None,
                                 Const(None, None, successor.addr, self.project.arch.bits),
-                                None,
+                                target_idx=successor.idx if isinstance(successor, Block) else None,
                                 ins_addr=last_src_stmt.ins_addr,
                             )
                             break_node = Block(last_src_stmt.ins_addr, None, statements=[break_stmt])
@@ -727,7 +730,7 @@ class PhoenixStructurer(StructurerBase):
                             break_stmt = Jump(
                                 None,
                                 Const(None, None, successor.addr, self.project.arch.bits),
-                                None,
+                                target_idx=successor.idx if isinstance(successor, Block) else None,
                                 ins_addr=last_src_stmt.ins_addr,
                             )
                             break_node_inner = Block(last_src_stmt.ins_addr, None, statements=[break_stmt])
@@ -744,7 +747,7 @@ class PhoenixStructurer(StructurerBase):
                                 break_stmt = Jump(
                                     None,
                                     Const(None, None, successor.addr, self.project.arch.bits),
-                                    None,
+                                    target_idx=successor.idx if isinstance(successor, Block) else None,
                                     ins_addr=last_src_stmt.ins_addr,
                                 )
                                 break_node = Block(last_src_stmt.ins_addr, None, statements=[break_stmt])
@@ -1003,7 +1006,7 @@ class PhoenixStructurer(StructurerBase):
             any_matches |= matched
             if matched:
                 break
-            if self._phoenix_improved:
+            if self._improve_algorithm:
                 l.debug("... matching acyclic ITE with short-circuit conditions at %r", node)
                 matched = self._match_acyclic_short_circuit_conditions(graph, full_graph, node)
                 l.debug("... matched: %s", matched)
@@ -1306,7 +1309,7 @@ class PhoenixStructurer(StructurerBase):
         graph,
         full_graph,
     ) -> tuple[ODict, Any, set[Any]]:
-        cases: ODict[int | tuple[int], SequenceNode] = OrderedDict()
+        cases: ODict[int | tuple[int], SequenceNode] = ODict()
         to_remove = set()
 
         # it is possible that the default node gets duplicated by other analyses and creates a default node (addr.a)
@@ -2107,7 +2110,7 @@ class PhoenixStructurer(StructurerBase):
         return None
 
     def _last_resort_refinement(self, head, graph: networkx.DiGraph, full_graph: networkx.DiGraph | None) -> bool:
-        if self._phoenix_improved:
+        if self._improve_algorithm:
             while self._edge_virtualization_hints:
                 src, dst = self._edge_virtualization_hints.pop(0)
                 if graph.has_edge(src, dst):
@@ -2144,7 +2147,7 @@ class PhoenixStructurer(StructurerBase):
         node_seq = {nn: (len(ordered_nodes) - idx) for (idx, nn) in enumerate(ordered_nodes)}  # post-order
 
         if all_edges_wo_dominance:
-            all_edges_wo_dominance = self._chick_order_edges(all_edges_wo_dominance, node_seq)
+            all_edges_wo_dominance = self._order_virtualizable_edges(full_graph, all_edges_wo_dominance, node_seq)
             # virtualize the first edge
             src, dst = all_edges_wo_dominance[0]
             self._virtualize_edge(graph, full_graph, src, dst)
@@ -2152,7 +2155,7 @@ class PhoenixStructurer(StructurerBase):
             return True
 
         if secondary_edges:
-            secondary_edges = self._chick_order_edges(secondary_edges, node_seq)
+            secondary_edges = self._order_virtualizable_edges(full_graph, secondary_edges, node_seq)
             # virtualize the first edge
             src, dst = secondary_edges[0]
             self._virtualize_edge(graph, full_graph, src, dst)
@@ -2228,6 +2231,15 @@ class PhoenixStructurer(StructurerBase):
             remove_last_statement(src)
 
     def _should_use_multistmtexprs(self, node: Block | BaseNode) -> bool:
+        """
+        The original Phoenix algorithm had no support for multi-stmt expressions, such as the following:
+        if ((x = y) && z) { ... }
+
+        There are multiple levels at which multi-stmt expressions can be used. If the Phoenix algorith is not not
+        set to be in improved mode, then we should not use multi-stmt expressions at all.
+        """
+        if not self._improve_algorithm:
+            return False
         if self._use_multistmtexprs == MultiStmtExprMode.NEVER:
             return False
         if self._use_multistmtexprs == MultiStmtExprMode.ALWAYS:
@@ -2312,7 +2324,6 @@ class PhoenixStructurer(StructurerBase):
                     walker.block_id += 1
                 if _check(block.nodes[-1].statements[-1]):
                     walker.parent_and_block.append((walker.block_id, parent, block))
-                    return
 
         def _handle_BreakNode(break_node: BreakNode, parent=None, **kwargs):  # pylint:disable=unused-argument
             walker.block_id += 1
@@ -2323,7 +2334,6 @@ class PhoenixStructurer(StructurerBase):
             ):
                 # FIXME: idx is ignored
                 walker.parent_and_block.append((walker.block_id, parent, break_node))
-                return
 
         walker = SequenceWalker(
             handlers={
@@ -2500,6 +2510,13 @@ class PhoenixStructurer(StructurerBase):
                     return PhoenixStructurer._remove_first_statement_if_jump(nn)
                 break
         return None
+
+    # pylint: disable=unused-argument,no-self-use
+    def _order_virtualizable_edges(self, graph: networkx.DiGraph, edges: list, node_seq: dict[Any, int]) -> list:
+        """
+        Returns a list of edges that are ordered by the best edges to virtualize first.
+        """
+        return PhoenixStructurer._chick_order_edges(edges, node_seq)
 
     @staticmethod
     def _chick_order_edges(edges: list, node_seq: dict[Any, int]) -> list:
