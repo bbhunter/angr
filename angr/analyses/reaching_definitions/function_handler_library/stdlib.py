@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 
 
 class EnvironAtom(Atom):
-    def __init__(self, name: str | None):
+    def __init__(self, size: int, name: str | None):
         self.name = name
-        super().__init__(1)
+        super().__init__(size)
 
     def _identity(self):
         if self.name is not None:
@@ -31,9 +31,9 @@ class EnvironAtom(Atom):
 
 
 class SystemAtom(Atom):
-    def __init__(self):
+    def __init__(self, size: int = 1):
         self.nonce = random.randint(0, 999999999999)
-        super().__init__(1)
+        super().__init__(size)
 
     def _identity(self):
         return (self.nonce,)
@@ -49,7 +49,7 @@ class ExecveAtom(Atom):
         super().__init__(size)
 
     def _identity(self):
-        return (self.nonce,)
+        return (self.nonce, self.idx)
 
     def __repr__(self):
         return f"<ExecveAtom {self.idx}>"
@@ -61,7 +61,10 @@ class LibcStdlibHandlers(FunctionHandler):
         buf_atoms = state.deref(data.args_atoms[0], DerefSize.NULL_TERMINATE)
         buf_value = state.get_concrete_value(buf_atoms, cast_to=bytes)
         if buf_value is not None:
-            buf_value = int(buf_value.decode().strip("\0"))
+            try:
+                buf_value = int(buf_value.decode().strip("\0"))
+            except ValueError:
+                buf_value = 0
         data.depends(data.ret_atoms, buf_atoms, value=buf_value)
 
     @FunctionCallDataUnwrapped.decorate
@@ -92,7 +95,7 @@ class LibcStdlibHandlers(FunctionHandler):
         heap_ptr = state.heap_allocator.allocate(2)
         heap_atom = state.deref(heap_ptr, 2)
         heap_value = claripy.BVS("weh", 8).concat(claripy.BVV(0, 8))
-        data.depends(heap_atom, EnvironAtom(name_value), value=heap_value)
+        data.depends(heap_atom, EnvironAtom(2, name_value), value=heap_value)
         data.depends(data.ret_atoms, value=state.heap_address(heap_ptr))
 
     @FunctionCallDataUnwrapped.decorate
@@ -105,12 +108,15 @@ class LibcStdlibHandlers(FunctionHandler):
 
         src_atom = state.deref(data.args_atoms[1], DerefSize.NULL_TERMINATE)
         src_value = state.get_values(src_atom)
-        data.depends(EnvironAtom(name_value), src_atom, value=src_value)
+        data.depends(
+            EnvironAtom(len(src_value) // 8 if src_value is not None else 1, name_value), src_atom, value=src_value
+        )
 
     @FunctionCallDataUnwrapped.decorate
     def handle_impl_system(self, state: ReachingDefinitionsState, data: FunctionCallDataUnwrapped):
         buf_atom = state.deref(data.args_atoms[0], DerefSize.NULL_TERMINATE)
-        data.depends(SystemAtom(), buf_atom)
+        buf_value = state.get_values(buf_atom)
+        data.depends(SystemAtom(len(buf_value) // 8 if buf_value is not None else 1), buf_atom, value=buf_value)
 
     handle_impl_popen = handle_impl_execl = handle_impl_system
 
@@ -131,12 +137,12 @@ class LibcStdlibHandlers(FunctionHandler):
                 # unknown if array continues
                 break
 
-            argv_deref_concrete = state.get_concrete_value(argv_deref_atom)
+            argv_deref_concrete = state.get_one_value(argv_deref_atom)
             if argv_deref_concrete is None:
                 # unknown if array continues
                 break
 
-            if argv_deref_concrete == 0:
+            if (argv_deref_concrete == 0).is_true():
                 # End of array
                 break
 
